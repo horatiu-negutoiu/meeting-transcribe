@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -20,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the top-level command parser."""
+    default_model = os.environ.get("OPENAI_MODEL_NAME", "").strip() or DEFAULT_MODEL
     parser = argparse.ArgumentParser(
         prog="meeting-scribe",
         description="Create a transcript and summary from a meeting recording.",
@@ -44,9 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
+        default=default_model,
         metavar="MODEL",
-        help=f"transcription model override (default: {DEFAULT_MODEL})",
+        help=f"transcription model override (default: OPENAI_MODEL_NAME or {DEFAULT_MODEL})",
     )
     return parser
 

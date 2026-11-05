@@ -83,12 +83,30 @@ $env:OPENAI_API_KEY = "your_api_key_here"
 ```
 
 Do not put the key in a command-line argument, recording filename, transcript,
-or committed configuration file. Meeting Scribe reads only `OPENAI_API_KEY`;
+or committed configuration file. Meeting Scribe reads credentials only from `OPENAI_API_KEY`;
 it does not accept credentials as CLI arguments or write them to its report.
 
 For a persistent setup, use your operating system's secret manager, your shell
 profile with appropriate file permissions, or a trusted environment manager.
 See [Security](SECURITY.md) for reporting a vulnerability and handling secrets.
+
+Optionally, set the transcription model in the same terminal:
+
+```console
+export OPENAI_MODEL_NAME="gpt-4o-transcribe-diarize"
+```
+
+On PowerShell:
+
+```powershell
+$env:OPENAI_MODEL_NAME = "gpt-4o-transcribe-diarize"
+```
+
+`--model` takes precedence over `OPENAI_MODEL_NAME`. If the variable is unset,
+empty, or whitespace-only, the default is `gpt-4o-transcribe-diarize`.
+Surrounding whitespace is trimmed. This variable controls transcription only;
+the summary model remains unchanged. Export these variables in your shell;
+Meeting Scribe does not automatically load `.env` files.
 
 ## Quick start
 
@@ -128,7 +146,8 @@ meeting-scribe [-h] [--output-dir DIR] [--language CODE]
   placed beside the recording.
 - `--language CODE` sets the spoken-language code. The default is `en`.
 - `--no-speakers` requests a transcript without speaker labels.
-- `--model MODEL` overrides the transcription model. The default is
+- `--model MODEL` overrides the transcription model, taking precedence over
+  `OPENAI_MODEL_NAME`. Without either setting, the default is
   `gpt-4o-transcribe-diarize`.
 
 For example, to produce a French report without speaker labels in a separate

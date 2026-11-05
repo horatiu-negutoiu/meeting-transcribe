@@ -39,6 +39,7 @@ def test_valid_m4a_reaches_workflow_with_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("OPENAI_MODEL_NAME", raising=False)
     created_at = datetime(2026, 7, 24, 12, 34, 56).astimezone()
     monkeypatch.setattr("meeting_scribe.cli._local_time", lambda: created_at)
     captured: list[ProcessingRequest] = []
