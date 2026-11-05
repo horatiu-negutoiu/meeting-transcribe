@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import httpx
+from openai import APITimeoutError
 import pytest
 
 from meeting_scribe.workflow import (
@@ -230,6 +232,111 @@ def test_duration_rejection_retries_small_diarized_recording_as_chunks(
     assert transcript.chunk_count == 2
 
 
+def test_single_upload_timeout_falls_back_to_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(tmp_path)
+    chunk_paths = [tmp_path / "chunk-0.m4a", tmp_path / "chunk-1.m4a"]
+    for path in chunk_paths:
+        path.write_bytes(b"audio")
+    monkeypatch.setattr(
+        "meeting_scribe.workflow.create_audio_chunks",
+        lambda *_: (AudioChunk(chunk_paths[0], 0), AudioChunk(chunk_paths[1], 118)),
+    )
+    client = FakeClient({"text": "unused"})
+    client.audio.transcriptions = FakeResponses([
+        APITimeoutError(request=httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")),
+        {"text": "First half"},
+        {"text": "Second half"},
+    ])
+
+    transcript = transcribe(request, client)
+
+    assert transcript.text == "First half Second half"
+    assert transcript.was_chunked is True
+    assert transcript.chunk_count == 2
+    assert [Path(call["file"].name).name for call in client.audio.transcriptions.calls] == [
+        "meeting.m4a", "chunk-0.m4a", "chunk-1.m4a",
+    ]
+
+
+def test_chunk_timeout_retries_only_failed_chunk_with_complete_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("meeting_scribe.workflow.time.sleep", lambda _: None)
+    request = _request(tmp_path)
+    request.audio_file.write_bytes(b"a" * (MAX_TRANSCRIPTION_UPLOAD_BYTES + 1))
+    chunk_paths = [tmp_path / "chunk-0.m4a", tmp_path / "chunk-1.m4a"]
+    chunk_paths[0].write_bytes(b"first audio")
+    chunk_paths[1].write_bytes(b"second audio")
+    monkeypatch.setattr(
+        "meeting_scribe.workflow.create_audio_chunks",
+        lambda *_: (AudioChunk(chunk_paths[0], 0), AudioChunk(chunk_paths[1], 118)),
+    )
+    # Consume each upload as the SDK would, so a retry must reopen the file.
+    uploads: list[bytes] = []
+    client = FakeClient({"text": "unused"})
+    responses = iter([
+        {"text": "First", "segments": [{"text": "First", "start": 0, "end": 1}]},
+        APITimeoutError(request=httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")),
+        {"text": "Second", "segments": [{"text": "Second", "start": 1, "end": 2}]},
+    ])
+
+    def create(**kwargs: object) -> object:
+        uploads.append(kwargs["file"].read())
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    client.audio.transcriptions.create = create
+
+    transcript = transcribe(request, client)
+
+    assert transcript.text == "First Second"
+    assert transcript.chunk_count == 2
+    assert [segment.start for segment in transcript.segments] == [0, 119]
+    assert uploads == [b"first audio", b"second audio", b"second audio"]
+
+
+@pytest.mark.parametrize(
+    ("provider_error", "expected_attempts", "expected_message"),
+    [
+        (
+            APITimeoutError(request=httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")),
+            2,
+            "chunk 1/2.*timed out",
+        ),
+        (RuntimeError("invalid audio"), 1, "invalid audio"),
+    ],
+)
+def test_chunk_failure_is_bounded_and_cleans_up_temporary_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    provider_error: Exception, expected_attempts: int, expected_message: str,
+) -> None:
+    monkeypatch.setattr("meeting_scribe.workflow.time.sleep", lambda _: None)
+    request = _request(tmp_path)
+    request.audio_file.write_bytes(b"a" * (MAX_TRANSCRIPTION_UPLOAD_BYTES + 1))
+    temporary_paths: list[Path] = []
+
+    def chunks(_: Path, directory: Path) -> tuple[AudioChunk, ...]:
+        temporary_paths.extend([directory / "first.m4a", directory / "second.m4a"])
+        for path in temporary_paths:
+            path.write_bytes(b"audio")
+        return tuple(AudioChunk(path, index * 118) for index, path in enumerate(temporary_paths))
+
+    monkeypatch.setattr("meeting_scribe.workflow.create_audio_chunks", chunks)
+    client = FakeClient(provider_error)
+
+    with pytest.raises(TranscriptionError, match=expected_message) as error:
+        transcribe(request, client)
+
+    assert error.value.__cause__ is provider_error
+    assert len(client.audio.transcriptions.calls) == expected_attempts
+    assert all(not path.exists() for path in temporary_paths)
+    assert not request.output_file.exists()
+
+
 def test_overlap_reconciliation_keeps_uncertain_boundary_speech() -> None:
     transcript = _combine_chunk_transcripts([
         (AudioChunk(Path("first.m4a"), 0), Transcript("alpha", (TranscriptSegment("alpha", start=0, end=5),))),
@@ -248,7 +355,7 @@ def test_oversized_recording_reports_missing_ffmpeg(tmp_path: Path, monkeypatch:
         transcribe(request, FakeClient({"text": "not used"}))
 
 
-def test_audio_chunks_respect_the_model_duration_limit(
+def test_hour_long_recording_uses_short_overlapping_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     commands: list[list[str]] = []
@@ -257,7 +364,7 @@ def test_audio_chunks_respect_the_model_duration_limit(
         "meeting_scribe.workflow._require_ffmpeg", lambda: ("ffmpeg", "ffprobe"),
     )
     monkeypatch.setattr(
-        "meeting_scribe.workflow._audio_duration", lambda *_: 3_126.3,
+        "meeting_scribe.workflow._audio_duration", lambda *_: 3_531.6,
     )
 
     def create_chunk(args: list[str]) -> object:
@@ -271,9 +378,11 @@ def test_audio_chunks_respect_the_model_duration_limit(
 
     chunks = create_audio_chunks(tmp_path / "meeting.m4a", tmp_path)
 
-    assert len(chunks) == 6
-    assert all(float(command[command.index("-t") + 1]) <= 600 for command in commands)
-    assert chunks[1].start == pytest.approx(600 - CHUNK_OVERLAP_SECONDS)
+    lengths = [float(command[command.index("-t") + 1]) for command in commands]
+    assert len(chunks) == 30
+    assert all(length <= 120 for length in lengths)
+    assert chunks[1].start == pytest.approx(120 - CHUNK_OVERLAP_SECONDS)
+    assert chunks[-1].start + lengths[-1] == pytest.approx(3_531.6)
 
 
 def test_summary_prompt_requires_evidence_and_supported_claims() -> None:

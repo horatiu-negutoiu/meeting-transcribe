@@ -178,10 +178,17 @@ identify people and can be inconsistent, especially across chunk boundaries.
 ## Large or long recordings
 
 The transcription upload limit is 25 MB. The default diarization model also has
-a per-request duration limit. If a recording is too large, or the API rejects
-it as too long for diarization, Meeting Scribe re-encodes it into overlapping,
-upload-safe `.m4a` chunks and retries. The overlap helps avoid losing speech at
-the boundary.
+a per-request duration limit. If a recording is too large, the API rejects it
+as too long for diarization, or a single upload times out, Meeting Scribe
+re-encodes it into overlapping `.m4a` chunks of at most two minutes and retries.
+The overlap helps avoid losing speech at the boundary.
+
+Each chunk that times out is retried once after a brief wait, with its audio
+reopened from the beginning. Completed chunks are kept in memory during that
+retry. If the second attempt also times out, the command stops and identifies
+the failed chunk and its starting timestamp. Each API request still has a
+five-minute timeout; retries are bounded. A new invocation starts the recording
+from the beginning.
 
 That fallback requires both `ffmpeg` and `ffprobe` to be installed and
 available on `PATH`. Common installation commands include:

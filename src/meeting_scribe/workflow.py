@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory, mkstemp
+import time
 from typing import Any, Protocol
 
 from meeting_scribe.config import get_openai_client
@@ -25,10 +26,11 @@ MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
 CHUNK_TARGET_BYTES = 20 * 1024 * 1024
 CHUNK_AUDIO_BITRATE = 64_000
 CHUNK_OVERLAP_SECONDS = 2.0
-# The diarization model permits up to 1,400 seconds per request, but much
-# shorter chunks give the API predictable turnaround and limit the work lost
-# if one request times out. The overlap is included within this ceiling.
-MAX_TRANSCRIPTION_CHUNK_SECONDS = 600.0
+# Keep uploads short enough to reduce timeout risk even when they are below
+# the provider's byte and duration limits. This ceiling includes the overlap.
+MAX_TRANSCRIPTION_CHUNK_SECONDS = 120.0
+MAX_TRANSCRIPTION_CHUNK_ATTEMPTS = 2
+TRANSCRIPTION_RETRY_DELAY_SECONDS = 2.0
 # This is an application-level input budget expressed in characters.  It keeps
 # requests comfortably below a model context window without pretending that
 # character count is an exact token count for every language.
@@ -328,8 +330,39 @@ def _combine_chunk_transcripts(chunks: list[tuple[AudioChunk, Transcript]]) -> T
     )
 
 
+def _transcribe_chunk(
+    chunk: AudioChunk, client: OpenAIClient, options: dict[str, object], description: str,
+) -> Transcript:
+    """Retry only timeout failures, reopening the upload for each attempt."""
+    from openai import APITimeoutError
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with chunk.path.open("rb") as audio_file:
+                response = client.audio.transcriptions.create(file=audio_file, **options)
+            return normalize_transcription(response)
+        except APITimeoutError as error:
+            if attempt >= MAX_TRANSCRIPTION_CHUNK_ATTEMPTS:
+                LOGGER.exception("%s timed out; no attempts remain.", description)
+                raise TranscriptionError(
+                    f"{description} timed out after {attempt} attempts. "
+                    "Check your connection and try again later. "
+                    f"Provider details: {error}"
+                ) from error
+            LOGGER.warning(
+                "%s timed out; retrying in %.1f seconds (attempt %d/%d).",
+                description, TRANSCRIPTION_RETRY_DELAY_SECONDS,
+                attempt + 1, MAX_TRANSCRIPTION_CHUNK_ATTEMPTS,
+            )
+            time.sleep(TRANSCRIPTION_RETRY_DELAY_SECONDS)
+
+
 def transcribe(request: ProcessingRequest, client: OpenAIClient) -> Transcript:
     """Submit audio and return a normalized result using an injectable client."""
+    from openai import APITimeoutError
+
     try:
         options = _transcription_options(request)
         size = request.audio_file.stat().st_size
@@ -344,6 +377,10 @@ def transcribe(request: ProcessingRequest, client: OpenAIClient) -> Transcript:
             try:
                 with request.audio_file.open("rb") as audio_file:
                     response = client.audio.transcriptions.create(file=audio_file, **options)
+            except APITimeoutError:
+                LOGGER.warning(
+                    "Single audio upload timed out; splitting it into shorter chunks before retrying."
+                )
             except Exception as error:
                 if not _is_diarization_duration_error(request, error):
                     raise
@@ -371,9 +408,11 @@ def transcribe(request: ProcessingRequest, client: OpenAIClient) -> Transcript:
                     len(chunks),
                     chunk.start,
                 )
-                with chunk.path.open("rb") as audio_file:
-                    response = client.audio.transcriptions.create(file=audio_file, **options)
-                responses.append((chunk, normalize_transcription(response)))
+                description = (
+                    f"Transcription chunk {index}/{len(chunks)} "
+                    f"(starting at {chunk.start:.1f} seconds)"
+                )
+                responses.append((chunk, _transcribe_chunk(chunk, client, options, description)))
         transcript = _combine_chunk_transcripts(responses)
         LOGGER.info(
             "Transcription complete: %d characters across %d segments.",
