@@ -135,12 +135,17 @@ jobs:
       id-token: write
 
     steps:
-      - name: Confirm the PyPI project name remains available
+      - name: Confirm the release version is not already on PyPI
         shell: bash
         run: |
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            https://pypi.org/pypi/meeting-transcribe/json)"
-          test "$status" = "404"
+          package_version="${GITHUB_REF_NAME#v}"
+          status="$(curl --silent --show-error --retry 3 --max-time 30 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/meeting-transcribe/${package_version}/json")"
+          if [ "$status" != "404" ]; then
+            echo "::error::Expected an unpublished version, but PyPI returned HTTP ${status} for meeting-transcribe==${package_version}."
+            exit 1
+          fi
 
       - name: Download release artifacts
         uses: actions/download-artifact@v4

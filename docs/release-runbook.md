@@ -49,9 +49,11 @@ token for this project.
    exact version to appear in its index, then installs the package in a clean
    environment and runs
    `meeting-scribe --help`.
-6. Review the TestPyPI job. The production job also checks immediately before
-   upload that `meeting-transcribe` is still unclaimed on PyPI. Approve the
-   `pypi` environment only after both checks pass.
+6. Review the TestPyPI job. The production job checks immediately before upload
+   that the exact release version is not already published on PyPI. An existing
+   `meeting-transcribe` project is expected for subsequent releases. If the
+   `pypi` environment requires approval, approve it only after the TestPyPI
+   checks pass.
 7. Once the PyPI job succeeds, verify the public installation in a new virtual
    environment:
 
@@ -64,7 +66,7 @@ token for this project.
 
 8. Open the project page at `https://pypi.org/project/meeting-transcribe/` and
    confirm its version, README, and package metadata. Create the corresponding
-   GitHub Release from the signed tag.
+   GitHub Release from the release tag.
 
 ## Rollback and remediation
 
@@ -74,5 +76,6 @@ approval if it is still pending, and publish a corrected version with a new
 version number. If a credential, repository, or workflow is compromised,
 disable the affected trusted publisher in PyPI/TestPyPI and the GitHub Actions
 workflow, investigate, then create a replacement publisher after remediation.
-If the project name is claimed before production approval, do not publish;
-cancel the release and choose a different distribution name.
+For an initial release, if the project name is claimed by someone else before
+production approval, do not publish; cancel the release and choose a different
+distribution name. Never reuse an already published version.
